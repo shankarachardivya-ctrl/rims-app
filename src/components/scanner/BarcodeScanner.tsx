@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Html5QrcodeScanner } from 'html5-qrcode'
-import { ArrowLeft, CheckCircle, Loader2 } from 'lucide-react'
+import { ArrowLeft, CheckCircle, Loader2, CameraOff } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { apiGetProduct } from '@/services/api'
 import type { Product } from '@/types'
@@ -12,12 +12,28 @@ interface BarcodeScannerProps {
 
 export function BarcodeScanner({ onProductFound, onBack }: BarcodeScannerProps) {
   const scannerRef  = useRef<Html5QrcodeScanner | null>(null)
-  const [status, setStatus]   = useState<'scanning' | 'found' | 'error' | 'loading'>('scanning')
+  const [status, setStatus]   = useState<'requesting' | 'scanning' | 'found' | 'error' | 'loading' | 'denied'>('requesting')
   const [scannedSku, setScannedSku] = useState('')
   const [product, setProduct] = useState<Product | null>(null)
   const [errorMsg, setErrorMsg] = useState('')
 
   useEffect(() => {
+    // Explicitly request camera permission first
+    navigator.mediaDevices?.getUserMedia({ video: { facingMode: 'environment' } })
+      .then((stream) => {
+        // Permission granted — stop the test stream and start scanner
+        stream.getTracks().forEach((t) => t.stop())
+        setStatus('scanning')
+      })
+      .catch((err) => {
+        console.error('Camera permission denied:', err)
+        setStatus('denied')
+      })
+  }, [])
+
+  useEffect(() => {
+    if (status !== 'scanning') return
+
     const scanner = new Html5QrcodeScanner(
       'barcode-reader',
       { fps: 10, qrbox: { width: 250, height: 150 }, rememberLastUsedCamera: true },
@@ -44,13 +60,38 @@ export function BarcodeScanner({ onProductFound, onBack }: BarcodeScannerProps) 
 
     scannerRef.current = scanner
     return () => { scanner.clear().catch(() => {}) }
-  }, [])
+  }, [status])
 
   return (
     <div className="space-y-4">
       <Button variant="ghost" size="sm" onClick={onBack} className="text-slate-400 hover:text-white -ml-2">
         <ArrowLeft className="h-4 w-4 mr-1" />Back
       </Button>
+
+      {status === 'requesting' && (
+        <div className="flex flex-col items-center gap-3 py-8">
+          <Loader2 className="h-8 w-8 text-violet-400 animate-spin" />
+          <p className="text-sm text-slate-400">Requesting camera access…</p>
+        </div>
+      )}
+
+      {status === 'denied' && (
+        <div className="space-y-4">
+          <div className="flex flex-col items-center gap-3 py-4 text-center">
+            <CameraOff className="h-10 w-10 text-red-400" />
+            <p className="text-sm font-medium text-red-300">Camera access denied</p>
+            <p className="text-xs text-slate-400">
+              To use the scanner, allow camera access in your browser settings, then reload the page.
+            </p>
+            <p className="text-xs text-slate-500">
+              Chrome: tap the lock icon in the address bar → Site settings → Camera → Allow
+            </p>
+          </div>
+          <Button variant="outline" className="w-full border-slate-700" onClick={() => window.location.reload()}>
+            Reload Page
+          </Button>
+        </div>
+      )}
 
       {status === 'scanning' && (
         <>
