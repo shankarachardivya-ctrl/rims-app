@@ -23,43 +23,52 @@ function extractTokens(text: string): string[] {
   return Array.from(tokens)
 }
 
+type Phase = 'idle' | 'camera' | 'processing' | 'results' | 'loading' | 'error'
+
 export function OcrScanner({ onProductFound, onBack }: OcrScannerProps) {
-  const videoRef    = useRef<HTMLVideoElement>(null)
-  const canvasRef   = useRef<HTMLCanvasElement>(null)
-  const streamRef   = useRef<MediaStream | null>(null)
-  const [phase, setPhase]       = useState<'idle' | 'camera' | 'processing' | 'results' | 'loading' | 'error'>('idle')
+  // Always keep video + canvas in DOM so refs are available immediately
+  const videoRef  = useRef<HTMLVideoElement>(null)
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const streamRef = useRef<MediaStream | null>(null)
+
+  const [phase, setPhase]       = useState<Phase>('idle')
   const [ocrText, setOcrText]   = useState('')
   const [tokens, setTokens]     = useState<string[]>([])
   const [errorMsg, setErrorMsg] = useState('')
-
-  const startCamera = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment' },
-      })
-      streamRef.current = stream
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream
-        videoRef.current.play()
-      }
-      setPhase('camera')
-    } catch {
-      setErrorMsg('Camera access denied. Please allow camera permission.')
-      setPhase('error')
-    }
-  }
 
   const stopCamera = () => {
     streamRef.current?.getTracks().forEach((t) => t.stop())
     streamRef.current = null
   }
 
+  const startCamera = async () => {
+    setPhase('camera')
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' } },
+      })
+      streamRef.current = stream
+
+      const video = videoRef.current!
+      video.srcObject = stream
+
+      await new Promise<void>((resolve) => {
+        video.onloadedmetadata = () => resolve()
+        setTimeout(resolve, 3000)
+      })
+
+      await video.play()
+    } catch {
+      setErrorMsg('Camera access denied. Please allow camera permission and try again.')
+      setPhase('error')
+    }
+  }
+
   const capture = async () => {
-    if (!videoRef.current || !canvasRef.current) return
-    const video  = videoRef.current
-    const canvas = canvasRef.current
-    canvas.width  = video.videoWidth
-    canvas.height = video.videoHeight
+    const video  = videoRef.current!
+    const canvas = canvasRef.current!
+    canvas.width  = video.videoWidth  || 640
+    canvas.height = video.videoHeight || 480
     canvas.getContext('2d')!.drawImage(video, 0, 0)
     stopCamera()
     setPhase('processing')
@@ -100,9 +109,33 @@ export function OcrScanner({ onProductFound, onBack }: OcrScannerProps) {
 
   return (
     <div className="space-y-4">
-      <Button variant="ghost" size="sm" onClick={() => { reset(); onBack() }} className="text-slate-400 hover:text-white -ml-2">
+      <Button
+        variant="ghost" size="sm"
+        onClick={() => { reset(); onBack() }}
+        className="text-slate-400 hover:text-white -ml-2"
+      >
         <ArrowLeft className="h-4 w-4 mr-1" />Back
       </Button>
+
+      {/* Video always in DOM — hidden unless in camera phase */}
+      <div className={phase === 'camera' ? 'space-y-3' : 'hidden'}>
+        <p className="text-sm text-slate-400">Point at the label, then press Capture.</p>
+        <div className="rounded-lg overflow-hidden bg-black">
+          <video
+            ref={videoRef}
+            className="w-full max-h-64 object-cover"
+            playsInline
+            muted
+            autoPlay
+          />
+        </div>
+        <Button className="w-full bg-cyan-700 hover:bg-cyan-600" onClick={capture}>
+          Capture &amp; Read Text
+        </Button>
+      </div>
+
+      {/* Canvas always in DOM for capture */}
+      <canvas ref={canvasRef} className="hidden" />
 
       {phase === 'idle' && (
         <div className="text-center space-y-4 py-4">
@@ -111,23 +144,12 @@ export function OcrScanner({ onProductFound, onBack }: OcrScannerProps) {
           </div>
           <div>
             <p className="font-medium text-white">OCR Text Scanner</p>
-            <p className="text-sm text-slate-400 mt-1">The camera will read all text on the label and extract the SKU for you.</p>
+            <p className="text-sm text-slate-400 mt-1">
+              The camera will read all text on the label and extract the SKU for you.
+            </p>
           </div>
           <Button className="w-full bg-cyan-700 hover:bg-cyan-600" onClick={startCamera}>
             Start Camera
-          </Button>
-        </div>
-      )}
-
-      {phase === 'camera' && (
-        <div className="space-y-3">
-          <p className="text-sm text-slate-400">Point at the label, then press Capture.</p>
-          <div className="rounded-lg overflow-hidden bg-black">
-            <video ref={videoRef} className="w-full" playsInline muted />
-          </div>
-          <canvas ref={canvasRef} className="hidden" />
-          <Button className="w-full bg-cyan-700 hover:bg-cyan-600" onClick={capture}>
-            Capture & Read Text
           </Button>
         </div>
       )}
@@ -165,10 +187,16 @@ export function OcrScanner({ onProductFound, onBack }: OcrScannerProps) {
               </div>
             </div>
           ) : (
-            <p className="text-sm text-slate-500">No SKU patterns detected in the text. Try again or use manual entry.</p>
+            <p className="text-sm text-slate-500">
+              No SKU patterns detected. Try again or use manual entry.
+            </p>
           )}
 
-          <Button variant="outline" className="w-full border-slate-700 text-slate-300" onClick={reset}>
+          <Button
+            variant="outline"
+            className="w-full border-slate-700 text-slate-300"
+            onClick={reset}
+          >
             Scan Again
           </Button>
         </div>
