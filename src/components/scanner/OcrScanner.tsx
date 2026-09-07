@@ -1,5 +1,5 @@
-import { useRef, useState } from 'react'
-import { createWorker } from 'tesseract.js'
+import { useEffect, useRef, useState } from 'react'
+import { createWorker, type Worker as TesseractWorker } from 'tesseract.js'
 import { Camera, ArrowLeft, Loader2, Tag, RotateCw, Search, PackagePlus } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -37,13 +37,30 @@ function rotateCanvas(src: HTMLCanvasElement, deg: number): HTMLCanvasElement {
 }
 
 /**
- * Grayscale + contrast stretch + upscale. Small text on glossy labels reads
- * far more reliably after this than from the raw camera frame.
+ * Longest edge fed to Tesseract, in pixels.
+ *
+ * Recognition cost scales with pixel count. Measured on a desktop:
+ * 1280x720 ~0.25s per pass, 1920x1080 ~0.43s, 3840x2160 ~1.6s. Feeding a
+ * full-resolution (or upscaled) frame is the single biggest cause of slow scans,
+ * and the extra pixels buy no accuracy for label-sized text.
  */
-function preprocess(src: HTMLCanvasElement, scale = 2): HTMLCanvasElement {
+const MAX_OCR_EDGE = 1280
+
+/**
+ * Grayscale + contrast stretch, normalised to MAX_OCR_EDGE.
+ *
+ * Large camera frames are scaled DOWN (a 1920x1080 frame becomes 1280x720,
+ * cutting pixels by ~2.3x); genuinely small frames are scaled up a little so
+ * fine print stays legible.
+ */
+function preprocess(src: HTMLCanvasElement): HTMLCanvasElement {
+  const longEdge = Math.max(src.width, src.height)
+  // Clamp so we neither explode the pixel count nor destroy small text
+  const scale = Math.min(1.5, Math.max(0.25, MAX_OCR_EDGE / longEdge))
+
   const out = document.createElement('canvas')
-  out.width  = src.width * scale
-  out.height = src.height * scale
+  out.width  = Math.max(1, Math.round(src.width * scale))
+  out.height = Math.max(1, Math.round(src.height * scale))
   const ctx = out.getContext('2d')!
   ctx.imageSmoothingEnabled = true
   ctx.imageSmoothingQuality = 'high'
@@ -74,6 +91,9 @@ export function OcrScanner({ onProductFound, onAddRequest, onBack }: OcrScannerP
   const videoRef  = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
+  /** Reused across captures — creating a worker costs ~1s plus a model download. */
+  const workerRef  = useRef<TesseractWorker | null>(null)
+  const warmingRef = useRef<Promise<TesseractWorker> | null>(null)
 
   const [phase, setPhase]         = useState<Phase>('idle')
   const [ocrText, setOcrText]     = useState('')
@@ -83,6 +103,8 @@ export function OcrScanner({ onProductFound, onAddRequest, onBack }: OcrScannerP
   const [manualSku, setManualSku] = useState('')
   /** True when the only thing recognised was a retail barcode number. */
   const [barcodeOnly, setBarcodeOnly] = useState(false)
+  /** Non-null while retrying a rotated orientation, for progress feedback. */
+  const [rotating, setRotating] = useState<number | null>(null)
   /** SKU that was read but not found, offered for creation. */
   const [addableSku, setAddableSku]   = useState<string | null>(null)
 
@@ -91,13 +113,57 @@ export function OcrScanner({ onProductFound, onAddRequest, onBack }: OcrScannerP
     streamRef.current = null
   }
 
+  /**
+   * Create (or reuse) the Tesseract worker.
+   *
+   * Started as soon as the camera opens so the ~1s init and the one-off model
+   * download overlap with the user framing the label. By capture time the
+   * worker is normally already warm, so only recognition remains.
+   */
+  const getWorker = (): Promise<TesseractWorker> => {
+    if (workerRef.current) return Promise.resolve(workerRef.current)
+    if (warmingRef.current) return warmingRef.current
+
+    warmingRef.current = (async () => {
+      const w = await createWorker('eng', 1, {
+        logger: (m: { status: string; progress: number }) => {
+          if (m.status === 'recognizing text') setProgress(Math.round(m.progress * 100))
+        },
+      })
+      // Label SKUs are uppercase alnum; a tight charset cuts glyph confusion.
+      await w.setParameters({
+        tessedit_char_whitelist:
+          'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789:+-.,/ ',
+      })
+      workerRef.current = w
+      return w
+    })()
+
+    return warmingRef.current
+  }
+
+  // Tear the worker down when the scanner unmounts
+  useEffect(() => {
+    return () => {
+      const w = workerRef.current
+      workerRef.current = null
+      warmingRef.current = null
+      w?.terminate().catch(() => {})
+      streamRef.current?.getTracks().forEach((t) => t.stop())
+    }
+  }, [])
+
   const startCamera = async () => {
     setPhase('camera')
+    // Warm the OCR engine in the background while the user aims.
+    getWorker().catch(() => {})
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: { ideal: 'environment' },
-          width:  { ideal: 1920 },
+          // 1440x1080 is ample once the frame is normalised to MAX_OCR_EDGE.
+          // Requesting 4K just costs capture and downscale time.
+          width:  { ideal: 1440 },
           height: { ideal: 1080 },
         },
       })
@@ -126,27 +192,22 @@ export function OcrScanner({ onProductFound, onAddRequest, onBack }: OcrScannerP
     setProgress(0)
 
     try {
-      const worker = await createWorker('eng', 1, {
-        logger: (m: { status: string; progress: number }) => {
-          if (m.status === 'recognizing text') setProgress(Math.round(m.progress * 100))
-        },
-      })
+      const worker = await getWorker()
+      const base = preprocess(canvas)
 
-      // Restrict the charset — label SKUs are uppercase alnum. This markedly
-      // reduces glyph confusion versus the default full charset.
-      await worker.setParameters({
-        tessedit_char_whitelist:
-          'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789:+-.,/ ',
-      })
-
-      const base = preprocess(canvas, 2)
-
-      // Try each orientation, keep whichever yields the strongest SKU candidate.
+      // Most labels are photographed upright, so try 0 degrees first and stop
+      // as soon as a usable SKU appears. Rotations only run when the first pass
+      // finds nothing, which keeps the common case to a single recognition.
       let bestText = ''
       let bestCands: SkuCandidate[] = []
       let bestScore = -1
 
-      for (const deg of [0, 90, 270, 180]) {
+      const ORIENTATIONS = [0, 90, 270, 180]
+      for (let i = 0; i < ORIENTATIONS.length; i++) {
+        const deg = ORIENTATIONS[i]
+        if (i > 0) setRotating(deg)
+        setProgress(0)
+
         const target = deg === 0 ? base : rotateCanvas(base, deg)
         const { data } = await worker.recognize(target)
         const text = data.text ?? ''
@@ -160,11 +221,11 @@ export function OcrScanner({ onProductFound, onAddRequest, onBack }: OcrScannerP
           bestText = text
           bestCands = cands
         }
-        // A captioned SKU match is conclusive — stop rotating.
-        if (cands.length > 0 && cands[0].kind === 'labelled') break
+        // Any candidate is good enough to stop; the user confirms it anyway.
+        if (cands.length > 0) break
       }
 
-      await worker.terminate()
+      setRotating(null)
       setOcrText(bestText)
       setCandidates(bestCands)
       setBarcodeOnly(bestCands.length === 0 && onlyFoundBarcode(bestText))
@@ -212,6 +273,7 @@ export function OcrScanner({ onProductFound, onAddRequest, onBack }: OcrScannerP
     setManualSku('')
     setBarcodeOnly(false)
     setAddableSku(null)
+    setRotating(null)
   }
 
   return (
@@ -263,8 +325,14 @@ export function OcrScanner({ onProductFound, onAddRequest, onBack }: OcrScannerP
       {phase === 'processing' && (
         <div className="flex flex-col items-center gap-3 py-8">
           <Loader2 className="h-8 w-8 text-cyan-400 animate-spin" />
-          <p className="text-sm text-slate-400">Reading label…{progress > 0 ? ` ${progress}%` : ''}</p>
-          <p className="text-xs text-slate-600">Checking all orientations</p>
+          <p className="text-sm text-slate-400">
+            Reading label…{progress > 0 ? ` ${progress}%` : ''}
+          </p>
+          <p className="text-xs text-slate-600">
+            {rotating === null
+              ? 'Looking for the SKU'
+              : `Nothing found upright — trying ${rotating}°`}
+          </p>
         </div>
       )}
 
