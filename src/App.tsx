@@ -8,6 +8,7 @@ import { TransactionsPage } from '@/pages/TransactionsPage'
 import { SuppliersPage } from '@/pages/SuppliersPage'
 import { CustomersPage } from '@/pages/CustomersPage'
 import { ReportsPage } from '@/pages/ReportsPage'
+import { UsersPage } from '@/pages/UsersPage'
 import { useAuthStore } from '@/store/authStore'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -36,6 +37,7 @@ function App() {
           <Route path="suppliers"     element={<SuppliersPage />} />
           <Route path="customers"     element={<CustomersPage />} />
           <Route path="reports"       element={<ReportsPage />} />
+          <Route path="users"         element={<UsersPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

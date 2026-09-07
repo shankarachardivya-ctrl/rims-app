@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { CheckCircle2, Loader2 } from 'lucide-react'
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
@@ -28,6 +28,15 @@ export function TransactionDialog({ open, onOpenChange, product }: TransactionDi
   const [remarks, setRemarks]   = useState('')
   const [done, setDone]         = useState(false)
 
+  // Generate the transaction ID once per dialog session so the ID shown to the
+  // user is the same one that gets submitted. Regenerating it on every render
+  // would display an ID that never matches the saved record.
+  const txId = useMemo(
+    () => generateTransactionId(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [open, product.sku]
+  )
+
   const unit = unitLabel(product.category)
 
   const handleQuantityChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -49,7 +58,6 @@ export function TransactionDialog({ open, onOpenChange, product }: TransactionDi
       return
     }
 
-    const txId = generateTransactionId()
     const ok = await submit({
       transactionId: txId,
       date: nowISO(),
@@ -118,7 +126,7 @@ export function TransactionDialog({ open, onOpenChange, product }: TransactionDi
             </div>
             <div className="flex items-center justify-between text-xs">
               <span className="text-slate-500">Transaction ID</span>
-              <span className="font-mono text-slate-400">{generateTransactionId()}</span>
+              <span className="font-mono text-slate-400">{txId}</span>
             </div>
             <div className="flex items-center justify-between text-xs">
               <span className="text-slate-500">Date / Time</span>
