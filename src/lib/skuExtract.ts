@@ -42,6 +42,25 @@ const NUMERIC_RANGE_RE = /^\d+[-–]\d+$/
 const BARCODE_RE = /^\d{8}$|^\d{12,14}$/
 
 /**
+ * True when a string is a retail barcode number (EAN/UPC/ITF) rather than a SKU.
+ *
+ * These must never be treated as a SKU: on many filament labels the barcode
+ * encodes a retail EAN that differs from the printed SKU, so using it as a SKU
+ * creates duplicate products for material that is already in stock.
+ */
+export function isBarcodeNumber(value: string): boolean {
+  return BARCODE_RE.test(value.trim())
+}
+
+export interface ExtractOptions {
+  /**
+   * Include retail barcode numbers in the candidate list.
+   * Defaults to false — OCR should only ever offer real SKU tokens.
+   */
+  includeBarcodes?: boolean
+}
+
+/**
  * Normalise OCR output: unify unicode dashes, strip zero-width chars,
  * and uppercase for matching.
  */
@@ -105,7 +124,11 @@ function scoreToken(token: string, line: string): number {
  * Extract ranked SKU candidates from raw OCR text.
  * Highest confidence first.
  */
-export function extractSkuCandidates(rawText: string): SkuCandidate[] {
+export function extractSkuCandidates(
+  rawText: string,
+  options: ExtractOptions = {}
+): SkuCandidate[] {
+  const { includeBarcodes = false } = options
   const text  = normalise(rawText)
   const lines = text.split(/\r?\n/)
 
@@ -138,7 +161,9 @@ export function extractSkuCandidates(rawText: string): SkuCandidate[] {
         if (!tok) continue
 
         if (BARCODE_RE.test(tok)) {
-          offer(tok, 30, 'barcode')
+          // Retail barcode. Excluded unless explicitly requested, because
+          // treating it as a SKU is what causes duplicate products.
+          if (includeBarcodes) offer(tok, 30, 'barcode')
           continue
         }
         const s = scoreToken(tok, line)
@@ -151,8 +176,19 @@ export function extractSkuCandidates(rawText: string): SkuCandidate[] {
 }
 
 /** Convenience: just the ranked candidate strings. */
-export function extractTokens(rawText: string): string[] {
-  return extractSkuCandidates(rawText).map((c) => c.value)
+export function extractTokens(rawText: string, options: ExtractOptions = {}): string[] {
+  return extractSkuCandidates(rawText, options).map((c) => c.value)
+}
+
+/**
+ * True when OCR found nothing usable except a retail barcode number.
+ * Used to tell the user to re-aim at the SKU line rather than failing silently.
+ */
+export function onlyFoundBarcode(rawText: string): boolean {
+  const skus = extractSkuCandidates(rawText, { includeBarcodes: false })
+  if (skus.length > 0) return false
+  return extractSkuCandidates(rawText, { includeBarcodes: true })
+    .some((c) => c.kind === 'barcode')
 }
 
 /**

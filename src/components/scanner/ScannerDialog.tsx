@@ -6,10 +6,11 @@ import {
 import { BarcodeScanner } from './BarcodeScanner'
 import { OcrScanner } from './OcrScanner'
 import { ManualSkuEntry } from './ManualSkuEntry'
+import { QuickAddProduct } from './QuickAddProduct'
 import type { Product } from '@/types'
 import { TransactionDialog } from '@/components/transaction/TransactionDialog'
 
-type ScanMode = 'select' | 'barcode' | 'ocr' | 'manual'
+type ScanMode = 'select' | 'barcode' | 'ocr' | 'manual' | 'quickadd'
 
 interface ScannerDialogProps {
   open: boolean
@@ -20,6 +21,9 @@ export function ScannerDialog({ open, onOpenChange }: ScannerDialogProps) {
   const [mode, setMode]                 = useState<ScanMode>('select')
   const [scannedProduct, setScannedProduct] = useState<Product | null>(null)
   const [txOpen, setTxOpen]             = useState(false)
+  const [pendingSku, setPendingSku]     = useState('')
+  /** Where to return if the user backs out of quick add. */
+  const [addOrigin, setAddOrigin]       = useState<ScanMode>('select')
 
   const handleProductFound = (product: Product) => {
     setScannedProduct(product)
@@ -27,7 +31,21 @@ export function ScannerDialog({ open, onOpenChange }: ScannerDialogProps) {
     setTxOpen(true)
   }
 
-  const reset = () => setMode('select')
+  /** A scan found a code that is not in the catalogue yet. */
+  const handleAddRequest = (sku: string, from: ScanMode) => {
+    setPendingSku(sku)
+    setAddOrigin(from)
+    setMode('quickadd')
+  }
+
+  // Newly created products go straight into a Stock In so the opening quantity
+  // is recorded as a real transaction rather than an untracked opening balance.
+  const handleCreated = (product: Product) => {
+    setPendingSku('')
+    handleProductFound(product)
+  }
+
+  const reset = () => { setMode('select'); setPendingSku('') }
 
   return (
     <>
@@ -40,6 +58,7 @@ export function ScannerDialog({ open, onOpenChange }: ScannerDialogProps) {
               {mode === 'barcode' && 'Barcode / QR Scanner'}
               {mode === 'ocr'     && 'OCR Text Scanner'}
               {mode === 'manual'  && 'Manual SKU Entry'}
+              {mode === 'quickadd' && 'Add New Product'}
             </DialogTitle>
           </DialogHeader>
 
@@ -89,15 +108,35 @@ export function ScannerDialog({ open, onOpenChange }: ScannerDialogProps) {
           )}
 
           {mode === 'barcode' && (
-            <BarcodeScanner onProductFound={handleProductFound} onBack={reset} />
+            <BarcodeScanner
+              onProductFound={handleProductFound}
+              onAddRequest={(sku) => handleAddRequest(sku, 'barcode')}
+              onBack={reset}
+            />
           )}
 
           {mode === 'ocr' && (
-            <OcrScanner onProductFound={handleProductFound} onBack={reset} />
+            <OcrScanner
+              onProductFound={handleProductFound}
+              onAddRequest={(sku) => handleAddRequest(sku, 'ocr')}
+              onBack={reset}
+            />
           )}
 
           {mode === 'manual' && (
-            <ManualSkuEntry onProductFound={handleProductFound} onBack={reset} />
+            <ManualSkuEntry
+              onProductFound={handleProductFound}
+              onAddRequest={(sku) => handleAddRequest(sku, 'manual')}
+              onBack={reset}
+            />
+          )}
+
+          {mode === 'quickadd' && (
+            <QuickAddProduct
+              initialSku={pendingSku}
+              onCreated={handleCreated}
+              onBack={() => setMode(addOrigin)}
+            />
           )}
         </DialogContent>
       </Dialog>

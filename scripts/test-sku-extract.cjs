@@ -92,10 +92,18 @@ console.log('\n=== Label 2 (Pure White, SKU PPNA11KPAL, EAN-13) ===')
   const tokens = cands.map((c) => c.value)
   console.log('  ranked:', tokens.slice(0, 6).join(', '))
   check('top candidate is PPNA11KPAL', tokens[0] === 'PPNA11KPAL', `got ${tokens[0]}`)
-  check('EAN-13 detected as barcode kind',
-    cands.some((c) => c.value === '8906216210115' && c.kind === 'barcode'))
-  check('EAN-13 ranked below SKU',
-    tokens.indexOf('PPNA11KPAL') < tokens.indexOf('8906216210115'))
+  // Barcodes must be excluded by default: the EAN on this label is NOT the SKU,
+  // and offering it would let the user create a duplicate product.
+  check('EAN-13 excluded by default', !tokens.includes('8906216210115'), tokens.join(','))
+  check('only the real SKU is offered', tokens.length === 1, tokens.join(','))
+  check('EAN-13 still available when explicitly requested',
+    extractSkuCandidates(LABEL2, { includeBarcodes: true })
+      .some((c) => c.value === '8906216210115' && c.kind === 'barcode'))
+  check('barcode ranked below SKU when included',
+    (() => {
+      const t = extractSkuCandidates(LABEL2, { includeBarcodes: true }).map((c) => c.value)
+      return t.indexOf('PPNA11KPAL') < t.indexOf('8906216210115')
+    })())
   check('no POLYLACTIC / ACID', !tokens.includes('POLYLACTIC') && !tokens.includes('ACID'))
   check('no PURE / WHITE', !tokens.includes('PURE') && !tokens.includes('WHITE'))
   check('no diameter 1.75', !tokens.some((t) => t.includes('1.75')))
@@ -107,6 +115,31 @@ console.log('\n=== Noisy label (no SKU caption) ===')
   console.log('  ranked:', tokens.slice(0, 6).join(', '))
   check('still finds PPNA11KPAL', tokens.includes('PPNA11KPAL'))
   check('PPNA11KPAL ranked first', tokens[0] === 'PPNA11KPAL', `got ${tokens[0]}`)
+  check('barcode not offered', !tokens.includes('8906216210115'))
+}
+
+console.log('\n=== Barcode-only label (the duplicate trap) ===')
+{
+  const { onlyFoundBarcode, isBarcodeNumber } = require(
+    path.join(__dirname, '..', '.tmp-test', 'skuExtract.cjs')
+  )
+  // A label where OCR caught the barcode digits but missed the SKU line
+  const BARCODE_ONLY = `
+PLA+ Polylactic Acid
+Pure White
+Net Weight 1 kg
+8906216210115
+`
+  const tokens = extractTokens(BARCODE_ONLY)
+  console.log('  ranked:', JSON.stringify(tokens))
+  check('no candidates offered at all', tokens.length === 0, tokens.join(','))
+  check('onlyFoundBarcode() flags it', onlyFoundBarcode(BARCODE_ONLY) === true)
+  check('onlyFoundBarcode() false when a SKU exists', onlyFoundBarcode(LABEL2) === false)
+
+  check('isBarcodeNumber: EAN-13', isBarcodeNumber('8906216210115') === true)
+  check('isBarcodeNumber: EAN-8', isBarcodeNumber('89062162') === true)
+  check('isBarcodeNumber: real SKU is not a barcode', isBarcodeNumber('PPNA11KPAL') === false)
+  check('isBarcodeNumber: dashed SKU is not a barcode', isBarcodeNumber('PLA-A11-KPAH') === false)
 }
 
 console.log('\n=== Legacy dashed SKU format ===')

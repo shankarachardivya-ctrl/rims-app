@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { ArrowLeft, CheckCircle, Loader2, CameraOff, Search } from 'lucide-react'
+import { ArrowLeft, CheckCircle, Loader2, CameraOff, Search, PackagePlus } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { apiGetProduct } from '@/services/api'
-import { skuVariants } from '@/lib/skuExtract'
+import { skuVariants, isBarcodeNumber } from '@/lib/skuExtract'
 import type { Product } from '@/types'
 
 interface BarcodeScannerProps {
   onProductFound: (product: Product) => void
+  /** Raised when the scanned code is a valid SKU shape but not in the catalogue. */
+  onAddRequest: (sku: string) => void
   onBack: () => void
 }
 
@@ -20,7 +22,7 @@ declare class BarcodeDetector {
 
 type Status = 'requesting' | 'scanning' | 'found' | 'error' | 'loading' | 'denied'
 
-export function BarcodeScanner({ onProductFound, onBack }: BarcodeScannerProps) {
+export function BarcodeScanner({ onProductFound, onAddRequest, onBack }: BarcodeScannerProps) {
   const videoRef    = useRef<HTMLVideoElement>(null)
   const streamRef   = useRef<MediaStream | null>(null)
   const rafRef      = useRef<number>(0)
@@ -31,6 +33,11 @@ export function BarcodeScanner({ onProductFound, onBack }: BarcodeScannerProps) 
   const [product, setProduct]       = useState<Product | null>(null)
   const [errorMsg, setErrorMsg]     = useState('')
   const [manualSku, setManualSku]   = useState('')
+  /**
+   * Whether the failed code may be used to create a product. False for retail
+   * barcodes (EAN/UPC), since adding one as a SKU is what produces duplicates.
+   */
+  const [addableSku, setAddableSku] = useState<string | null>(null)
 
   const stopStream = useCallback(() => {
     scanningRef.current = false
@@ -56,13 +63,21 @@ export function BarcodeScanner({ onProductFound, onBack }: BarcodeScannerProps) 
     }
 
     setStatus('error')
-    // A pure digit string is a retail barcode (EAN/UPC), which on many labels
-    // is NOT the SKU. Say so explicitly instead of a generic failure.
-    setErrorMsg(
-      /^\d{8,14}$/.test(sku)
-        ? `Scanned barcode ${sku} is a retail barcode (EAN/UPC), which is often different from the product SKU. Enter the SKU printed on the label instead.`
-        : `No product found for "${sku}".`
-    )
+
+    // A pure digit string is a retail barcode (EAN/UPC). On many filament
+    // labels this differs from the printed SKU, so we must NOT offer to create
+    // a product under it — that is exactly how duplicates get made.
+    if (isBarcodeNumber(sku)) {
+      setAddableSku(null)
+      setErrorMsg(
+        `${sku} is a retail barcode (EAN/UPC), not a SKU. On many labels these differ, ` +
+        `so adding it as a product would create a duplicate. Use the OCR scanner or type ` +
+        `the SKU printed on the label.`
+      )
+    } else {
+      setAddableSku(sku)
+      setErrorMsg(`No product in the list matches "${sku}".`)
+    }
   }, [stopStream])
 
   const startScanner = useCallback(async () => {
@@ -254,9 +269,27 @@ export function BarcodeScanner({ onProductFound, onBack }: BarcodeScannerProps) 
 
       {status === 'error' && (
         <div className="space-y-4">
-          <div className="bg-red-900/30 border border-red-800 rounded-lg p-4">
-            <p className="text-sm text-red-300">{errorMsg}</p>
+          <div className={[
+            'rounded-lg p-4 border',
+            addableSku
+              ? 'bg-amber-900/25 border-amber-800'
+              : 'bg-red-900/30 border-red-800',
+          ].join(' ')}>
+            <p className={`text-sm ${addableSku ? 'text-amber-300' : 'text-red-300'}`}>
+              {errorMsg}
+            </p>
           </div>
+
+          {/* Offer creation only for SKU-shaped codes */}
+          {addableSku && (
+            <Button
+              className="w-full bg-emerald-700 hover:bg-emerald-600 gap-2"
+              onClick={() => onAddRequest(addableSku)}
+            >
+              <PackagePlus className="h-4 w-4" />
+              Add {addableSku} as a new product
+            </Button>
+          )}
 
           {/* Manual fallback so a barcode/SKU mismatch is never a dead end */}
           <div className="space-y-1.5">
@@ -286,7 +319,7 @@ export function BarcodeScanner({ onProductFound, onBack }: BarcodeScannerProps) 
           <Button
             variant="outline"
             className="w-full border-slate-700"
-            onClick={() => { setManualSku(''); startScanner() }}
+            onClick={() => { setManualSku(''); setAddableSku(null); startScanner() }}
           >
             Scan Again
           </Button>

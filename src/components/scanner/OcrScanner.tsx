@@ -1,14 +1,19 @@
 import { useRef, useState } from 'react'
 import { createWorker } from 'tesseract.js'
-import { Camera, ArrowLeft, Loader2, Tag, Barcode, RotateCw, Search } from 'lucide-react'
+import { Camera, ArrowLeft, Loader2, Tag, RotateCw, Search, PackagePlus } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { apiGetProduct } from '@/services/api'
-import { extractSkuCandidates, skuVariants, type SkuCandidate } from '@/lib/skuExtract'
+import {
+  extractSkuCandidates, skuVariants, onlyFoundBarcode, isBarcodeNumber,
+  type SkuCandidate,
+} from '@/lib/skuExtract'
 import type { Product } from '@/types'
 
 interface OcrScannerProps {
   onProductFound: (product: Product) => void
+  /** Raised when a SKU was read from the label but is not in the catalogue. */
+  onAddRequest: (sku: string) => void
   onBack: () => void
 }
 
@@ -65,7 +70,7 @@ function preprocess(src: HTMLCanvasElement, scale = 2): HTMLCanvasElement {
   return out
 }
 
-export function OcrScanner({ onProductFound, onBack }: OcrScannerProps) {
+export function OcrScanner({ onProductFound, onAddRequest, onBack }: OcrScannerProps) {
   const videoRef  = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
@@ -76,6 +81,10 @@ export function OcrScanner({ onProductFound, onBack }: OcrScannerProps) {
   const [errorMsg, setErrorMsg]   = useState('')
   const [progress, setProgress]   = useState(0)
   const [manualSku, setManualSku] = useState('')
+  /** True when the only thing recognised was a retail barcode number. */
+  const [barcodeOnly, setBarcodeOnly] = useState(false)
+  /** SKU that was read but not found, offered for creation. */
+  const [addableSku, setAddableSku]   = useState<string | null>(null)
 
   const stopCamera = () => {
     streamRef.current?.getTracks().forEach((t) => t.stop())
@@ -141,7 +150,9 @@ export function OcrScanner({ onProductFound, onBack }: OcrScannerProps) {
         const target = deg === 0 ? base : rotateCanvas(base, deg)
         const { data } = await worker.recognize(target)
         const text = data.text ?? ''
-        const cands = extractSkuCandidates(text)
+        // Retail barcode numbers are deliberately excluded: on many labels the
+        // barcode differs from the SKU, and offering it invites duplicates.
+        const cands = extractSkuCandidates(text, { includeBarcodes: false })
         const top = cands.length > 0 ? cands[0].score : 0
 
         if (top > bestScore) {
@@ -156,6 +167,7 @@ export function OcrScanner({ onProductFound, onBack }: OcrScannerProps) {
       await worker.terminate()
       setOcrText(bestText)
       setCandidates(bestCands)
+      setBarcodeOnly(bestCands.length === 0 && onlyFoundBarcode(bestText))
       setPhase('results')
     } catch (err) {
       setErrorMsg(`OCR failed: ${err instanceof Error ? err.message : 'unknown error'}`)
@@ -167,8 +179,17 @@ export function OcrScanner({ onProductFound, onBack }: OcrScannerProps) {
   const lookup = async (raw: string) => {
     const sku = raw.trim().toUpperCase()
     if (!sku) return
-    setPhase('loading')
 
+    if (isBarcodeNumber(sku)) {
+      setAddableSku(null)
+      setErrorMsg(
+        `${sku} is a retail barcode, not a SKU. Enter the SKU printed on the label instead.`
+      )
+      setPhase('error')
+      return
+    }
+
+    setPhase('loading')
     for (const attempt of skuVariants(sku)) {
       const res = await apiGetProduct(attempt)
       if (res.success && res.data) {
@@ -176,7 +197,8 @@ export function OcrScanner({ onProductFound, onBack }: OcrScannerProps) {
         return
       }
     }
-    setErrorMsg(`No product found for "${sku}". Check the SKU or add the product first.`)
+    setAddableSku(sku)
+    setErrorMsg(`No product in the list matches "${sku}".`)
     setPhase('error')
   }
 
@@ -188,6 +210,8 @@ export function OcrScanner({ onProductFound, onBack }: OcrScannerProps) {
     setErrorMsg('')
     setProgress(0)
     setManualSku('')
+    setBarcodeOnly(false)
+    setAddableSku(null)
   }
 
   return (
@@ -258,20 +282,27 @@ export function OcrScanner({ onProductFound, onBack }: OcrScannerProps) {
                     onClick={() => lookup(c.value)}
                     className={[
                       'flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-sm font-mono transition-colors',
-                      c.kind === 'barcode'
-                        ? 'bg-sky-900/50 border-sky-700 text-sky-300 hover:bg-sky-800/50'
-                        : c.kind === 'labelled'
+                      c.kind === 'labelled'
                         ? 'bg-emerald-900/50 border-emerald-600 text-emerald-300 hover:bg-emerald-800/50'
                         : 'bg-violet-900/50 border-violet-700 text-violet-300 hover:bg-violet-800/50',
                     ].join(' ')}
                   >
-                    {c.kind === 'barcode' ? <Barcode className="h-3 w-3" /> : <Tag className="h-3 w-3" />}
+                    <Tag className="h-3 w-3" />
                     {c.value}
                   </button>
                 ))}
               </div>
               <p className="text-xs text-slate-600 mt-2">
-                Green = found next to a “SKU” label · Violet = matched SKU pattern · Blue = barcode number
+                Green = found next to a “SKU” caption · Violet = matched SKU pattern.
+                Barcode numbers are ignored on purpose.
+              </p>
+            </div>
+          ) : barcodeOnly ? (
+            <div className="bg-amber-900/20 border border-amber-800 rounded-lg p-3">
+              <p className="text-sm text-amber-300">Only a barcode number was recognised.</p>
+              <p className="text-xs text-amber-400/70 mt-1">
+                That barcode is not the SKU. Re-aim at the line on the label that reads
+                “SKU”, or type it below.
               </p>
             </div>
           ) : (
@@ -331,12 +362,28 @@ export function OcrScanner({ onProductFound, onBack }: OcrScannerProps) {
 
       {phase === 'error' && (
         <div className="space-y-4">
-          <div className="bg-red-900/30 border border-red-800 rounded-lg p-4">
-            <p className="text-sm text-red-300">{errorMsg}</p>
+          <div className={[
+            'rounded-lg p-4 border',
+            addableSku ? 'bg-amber-900/25 border-amber-800' : 'bg-red-900/30 border-red-800',
+          ].join(' ')}>
+            <p className={`text-sm ${addableSku ? 'text-amber-300' : 'text-red-300'}`}>
+              {errorMsg}
+            </p>
           </div>
+
+          {addableSku && (
+            <Button
+              className="w-full bg-emerald-700 hover:bg-emerald-600 gap-2"
+              onClick={() => onAddRequest(addableSku)}
+            >
+              <PackagePlus className="h-4 w-4" />
+              Add {addableSku} as a new product
+            </Button>
+          )}
+
           {candidates.length > 0 && (
             <Button variant="outline" className="w-full border-slate-700 text-slate-300"
-              onClick={() => setPhase('results')}>
+              onClick={() => { setAddableSku(null); setPhase('results') }}>
               Back to Results
             </Button>
           )}

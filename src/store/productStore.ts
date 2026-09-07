@@ -16,7 +16,8 @@ interface ProductState {
   error: string | null
   fetchAll: () => Promise<void>
   search: (query: string) => Promise<void>
-  add: (product: Parameters<typeof apiAddProduct>[0]) => Promise<boolean>
+  /** Returns the created product (truthy) or null on failure. */
+  add: (product: Parameters<typeof apiAddProduct>[0]) => Promise<Product | null>
   update: (product: Product) => Promise<boolean>
   remove: (sku: string) => Promise<boolean>
   clearSearch: () => void
@@ -56,10 +57,11 @@ export const useProductStore = create<ProductState>((set) => ({
   add: async (product) => {
     const res = await apiAddProduct(product)
     if (res.success && res.data) {
-      set((state) => ({ products: [...state.products, res.data!] }))
-      return true
+      const created = res.data
+      set((state) => ({ products: [...state.products, created] }))
+      return created
     }
-    return false
+    return null
   },
 
   update: async (product) => {
