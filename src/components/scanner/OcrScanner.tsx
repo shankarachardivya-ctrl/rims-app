@@ -1,8 +1,10 @@
 import { useRef, useState } from 'react'
 import { createWorker } from 'tesseract.js'
-import { Camera, ArrowLeft, Loader2, Tag } from 'lucide-react'
+import { Camera, ArrowLeft, Loader2, Tag, Barcode, RotateCw, Search } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { apiGetProduct } from '@/services/api'
+import { extractSkuCandidates, skuVariants, type SkuCandidate } from '@/lib/skuExtract'
 import type { Product } from '@/types'
 
 interface OcrScannerProps {
@@ -10,31 +12,70 @@ interface OcrScannerProps {
   onBack: () => void
 }
 
-// Extract likely SKU tokens from OCR text
-// SKU pattern: uppercase letters and digits with dashes, e.g. PLA-A11-KPAH
-function extractTokens(text: string): string[] {
-  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean)
-  const skuPattern = /\b[A-Z]{2,}[-][A-Z0-9]{1,}([-][A-Z0-9]{1,})*/g
-  const tokens = new Set<string>()
-  for (const line of lines) {
-    const matches = line.match(skuPattern)
-    if (matches) matches.forEach((m) => tokens.add(m))
-  }
-  return Array.from(tokens)
-}
-
 type Phase = 'idle' | 'camera' | 'processing' | 'results' | 'loading' | 'error'
 
+/**
+ * Draw the source canvas rotated by `deg` into a new canvas.
+ * Labels are frequently photographed sideways, and Tesseract is poor at
+ * reading rotated text, so we OCR several orientations and keep the best.
+ */
+function rotateCanvas(src: HTMLCanvasElement, deg: number): HTMLCanvasElement {
+  const out = document.createElement('canvas')
+  const swap = deg === 90 || deg === 270
+  out.width  = swap ? src.height : src.width
+  out.height = swap ? src.width  : src.height
+  const ctx = out.getContext('2d')!
+  ctx.translate(out.width / 2, out.height / 2)
+  ctx.rotate((deg * Math.PI) / 180)
+  ctx.drawImage(src, -src.width / 2, -src.height / 2)
+  return out
+}
+
+/**
+ * Grayscale + contrast stretch + upscale. Small text on glossy labels reads
+ * far more reliably after this than from the raw camera frame.
+ */
+function preprocess(src: HTMLCanvasElement, scale = 2): HTMLCanvasElement {
+  const out = document.createElement('canvas')
+  out.width  = src.width * scale
+  out.height = src.height * scale
+  const ctx = out.getContext('2d')!
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
+  ctx.drawImage(src, 0, 0, out.width, out.height)
+
+  const img = ctx.getImageData(0, 0, out.width, out.height)
+  const d = img.data
+
+  // Grayscale + track min/max for contrast stretch
+  let min = 255, max = 0
+  for (let i = 0; i < d.length; i += 4) {
+    const g = (d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114) | 0
+    d[i] = d[i + 1] = d[i + 2] = g
+    if (g < min) min = g
+    if (g > max) max = g
+  }
+  const range = Math.max(1, max - min)
+  for (let i = 0; i < d.length; i += 4) {
+    const v = ((d[i] - min) / range) * 255
+    const c = v < 0 ? 0 : v > 255 ? 255 : v
+    d[i] = d[i + 1] = d[i + 2] = c
+  }
+  ctx.putImageData(img, 0, 0)
+  return out
+}
+
 export function OcrScanner({ onProductFound, onBack }: OcrScannerProps) {
-  // Always keep video + canvas in DOM so refs are available immediately
   const videoRef  = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
 
-  const [phase, setPhase]       = useState<Phase>('idle')
-  const [ocrText, setOcrText]   = useState('')
-  const [tokens, setTokens]     = useState<string[]>([])
-  const [errorMsg, setErrorMsg] = useState('')
+  const [phase, setPhase]         = useState<Phase>('idle')
+  const [ocrText, setOcrText]     = useState('')
+  const [candidates, setCandidates] = useState<SkuCandidate[]>([])
+  const [errorMsg, setErrorMsg]   = useState('')
+  const [progress, setProgress]   = useState(0)
+  const [manualSku, setManualSku] = useState('')
 
   const stopCamera = () => {
     streamRef.current?.getTracks().forEach((t) => t.stop())
@@ -45,21 +86,22 @@ export function OcrScanner({ onProductFound, onBack }: OcrScannerProps) {
     setPhase('camera')
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' } },
+        video: {
+          facingMode: { ideal: 'environment' },
+          width:  { ideal: 1920 },
+          height: { ideal: 1080 },
+        },
       })
       streamRef.current = stream
-
       const video = videoRef.current!
       video.srcObject = stream
-
       await new Promise<void>((resolve) => {
         video.onloadedmetadata = () => resolve()
         setTimeout(resolve, 3000)
       })
-
       await video.play()
     } catch {
-      setErrorMsg('Camera access denied. Please allow camera permission and try again.')
+      setErrorMsg('Camera access denied. Allow camera permission and try again.')
       setPhase('error')
     }
   }
@@ -67,44 +109,85 @@ export function OcrScanner({ onProductFound, onBack }: OcrScannerProps) {
   const capture = async () => {
     const video  = videoRef.current!
     const canvas = canvasRef.current!
-    canvas.width  = video.videoWidth  || 640
-    canvas.height = video.videoHeight || 480
+    canvas.width  = video.videoWidth  || 1280
+    canvas.height = video.videoHeight || 720
     canvas.getContext('2d')!.drawImage(video, 0, 0)
     stopCamera()
     setPhase('processing')
+    setProgress(0)
 
     try {
-      const worker = await createWorker('eng')
-      const { data } = await worker.recognize(canvas)
+      const worker = await createWorker('eng', 1, {
+        logger: (m: { status: string; progress: number }) => {
+          if (m.status === 'recognizing text') setProgress(Math.round(m.progress * 100))
+        },
+      })
+
+      // Restrict the charset — label SKUs are uppercase alnum. This markedly
+      // reduces glyph confusion versus the default full charset.
+      await worker.setParameters({
+        tessedit_char_whitelist:
+          'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789:+-.,/ ',
+      })
+
+      const base = preprocess(canvas, 2)
+
+      // Try each orientation, keep whichever yields the strongest SKU candidate.
+      let bestText = ''
+      let bestCands: SkuCandidate[] = []
+      let bestScore = -1
+
+      for (const deg of [0, 90, 270, 180]) {
+        const target = deg === 0 ? base : rotateCanvas(base, deg)
+        const { data } = await worker.recognize(target)
+        const text = data.text ?? ''
+        const cands = extractSkuCandidates(text)
+        const top = cands.length > 0 ? cands[0].score : 0
+
+        if (top > bestScore) {
+          bestScore = top
+          bestText = text
+          bestCands = cands
+        }
+        // A captioned SKU match is conclusive — stop rotating.
+        if (cands.length > 0 && cands[0].kind === 'labelled') break
+      }
+
       await worker.terminate()
-      const text = data.text
-      setOcrText(text)
-      const found = extractTokens(text)
-      setTokens(found)
+      setOcrText(bestText)
+      setCandidates(bestCands)
       setPhase('results')
-    } catch {
-      setErrorMsg('OCR failed. Please try again.')
+    } catch (err) {
+      setErrorMsg(`OCR failed: ${err instanceof Error ? err.message : 'unknown error'}`)
       setPhase('error')
     }
   }
 
-  const selectToken = async (token: string) => {
+  /** Look up a SKU, retrying OCR-confusion variants before giving up. */
+  const lookup = async (raw: string) => {
+    const sku = raw.trim().toUpperCase()
+    if (!sku) return
     setPhase('loading')
-    const res = await apiGetProduct(token)
-    if (res.success && res.data) {
-      onProductFound(res.data)
-    } else {
-      setErrorMsg(`No product found for SKU: "${token}"`)
-      setPhase('error')
+
+    for (const attempt of skuVariants(sku)) {
+      const res = await apiGetProduct(attempt)
+      if (res.success && res.data) {
+        onProductFound(res.data)
+        return
+      }
     }
+    setErrorMsg(`No product found for "${sku}". Check the SKU or add the product first.`)
+    setPhase('error')
   }
 
   const reset = () => {
     stopCamera()
     setPhase('idle')
     setOcrText('')
-    setTokens([])
+    setCandidates([])
     setErrorMsg('')
+    setProgress(0)
+    setManualSku('')
   }
 
   return (
@@ -117,24 +200,23 @@ export function OcrScanner({ onProductFound, onBack }: OcrScannerProps) {
         <ArrowLeft className="h-4 w-4 mr-1" />Back
       </Button>
 
-      {/* Video always in DOM — hidden unless in camera phase */}
+      {/* Video kept mounted so the ref is valid the moment the stream starts */}
       <div className={phase === 'camera' ? 'space-y-3' : 'hidden'}>
-        <p className="text-sm text-slate-400">Point at the label, then press Capture.</p>
+        <p className="text-sm text-slate-400">
+          Fill the frame with the label and hold steady, then Capture.
+        </p>
         <div className="rounded-lg overflow-hidden bg-black">
-          <video
-            ref={videoRef}
-            className="w-full max-h-64 object-cover"
-            playsInline
-            muted
-            autoPlay
-          />
+          <video ref={videoRef} className="w-full max-h-72 object-cover" playsInline muted autoPlay />
         </div>
+        <p className="text-xs text-slate-500 flex items-center gap-1.5">
+          <RotateCw className="h-3 w-3 shrink-0" />
+          Sideways labels are fine — all orientations are checked automatically.
+        </p>
         <Button className="w-full bg-cyan-700 hover:bg-cyan-600" onClick={capture}>
           Capture &amp; Read Text
         </Button>
       </div>
 
-      {/* Canvas always in DOM for capture */}
       <canvas ref={canvasRef} className="hidden" />
 
       {phase === 'idle' && (
@@ -145,7 +227,7 @@ export function OcrScanner({ onProductFound, onBack }: OcrScannerProps) {
           <div>
             <p className="font-medium text-white">OCR Text Scanner</p>
             <p className="text-sm text-slate-400 mt-1">
-              The camera will read all text on the label and extract the SKU for you.
+              Reads the printed text on the label and pulls out the SKU.
             </p>
           </div>
           <Button className="w-full bg-cyan-700 hover:bg-cyan-600" onClick={startCamera}>
@@ -157,46 +239,84 @@ export function OcrScanner({ onProductFound, onBack }: OcrScannerProps) {
       {phase === 'processing' && (
         <div className="flex flex-col items-center gap-3 py-8">
           <Loader2 className="h-8 w-8 text-cyan-400 animate-spin" />
-          <p className="text-sm text-slate-400">Reading text from label…</p>
+          <p className="text-sm text-slate-400">Reading label…{progress > 0 ? ` ${progress}%` : ''}</p>
+          <p className="text-xs text-slate-600">Checking all orientations</p>
         </div>
       )}
 
       {phase === 'results' && (
         <div className="space-y-4">
-          <div>
-            <p className="text-sm font-medium text-slate-300 mb-2">Recognised text:</p>
-            <div className="bg-slate-800 rounded-lg p-3 text-xs text-slate-400 font-mono whitespace-pre-wrap max-h-28 overflow-auto">
-              {ocrText || '(no text detected)'}
-            </div>
-          </div>
-
-          {tokens.length > 0 ? (
+          {candidates.length > 0 ? (
             <div>
-              <p className="text-sm font-medium text-slate-300 mb-2">Tap the SKU to look up:</p>
+              <p className="text-sm font-medium text-slate-300 mb-2">
+                Tap the correct code:
+              </p>
               <div className="flex flex-wrap gap-2">
-                {tokens.map((token) => (
+                {candidates.slice(0, 8).map((c) => (
                   <button
-                    key={token}
-                    onClick={() => selectToken(token)}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-900/50 border border-violet-700 text-violet-300 text-sm font-mono hover:bg-violet-800/50 transition-colors"
+                    key={c.value}
+                    onClick={() => lookup(c.value)}
+                    className={[
+                      'flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-sm font-mono transition-colors',
+                      c.kind === 'barcode'
+                        ? 'bg-sky-900/50 border-sky-700 text-sky-300 hover:bg-sky-800/50'
+                        : c.kind === 'labelled'
+                        ? 'bg-emerald-900/50 border-emerald-600 text-emerald-300 hover:bg-emerald-800/50'
+                        : 'bg-violet-900/50 border-violet-700 text-violet-300 hover:bg-violet-800/50',
+                    ].join(' ')}
                   >
-                    <Tag className="h-3 w-3" />
-                    {token}
+                    {c.kind === 'barcode' ? <Barcode className="h-3 w-3" /> : <Tag className="h-3 w-3" />}
+                    {c.value}
                   </button>
                 ))}
               </div>
+              <p className="text-xs text-slate-600 mt-2">
+                Green = found next to a “SKU” label · Violet = matched SKU pattern · Blue = barcode number
+              </p>
             </div>
           ) : (
-            <p className="text-sm text-slate-500">
-              No SKU patterns detected. Try again or use manual entry.
-            </p>
+            <div className="bg-amber-900/20 border border-amber-800 rounded-lg p-3">
+              <p className="text-sm text-amber-300">No SKU detected in the label text.</p>
+              <p className="text-xs text-amber-400/70 mt-1">
+                Try again with more light and the label filling the frame, or type it below.
+              </p>
+            </div>
           )}
 
-          <Button
-            variant="outline"
-            className="w-full border-slate-700 text-slate-300"
-            onClick={reset}
-          >
+          {/* Always offer a manual override */}
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-slate-400" htmlFor="ocr-manual">
+              Or enter the SKU yourself
+            </label>
+            <div className="flex gap-2">
+              <Input
+                id="ocr-manual"
+                className="bg-slate-800 border-slate-700 text-white font-mono uppercase"
+                placeholder="e.g. PPNA11KPAL"
+                value={manualSku}
+                onChange={(e) => setManualSku(e.target.value.toUpperCase())}
+                onKeyDown={(e) => { if (e.key === 'Enter') lookup(manualSku) }}
+              />
+              <Button
+                className="bg-violet-600 hover:bg-violet-700 shrink-0"
+                onClick={() => lookup(manualSku)}
+                disabled={!manualSku.trim()}
+              >
+                <Search className="h-4 w-4" />
+              </Button>
+            </div>
+          </div>
+
+          <details className="group">
+            <summary className="text-xs text-slate-500 cursor-pointer hover:text-slate-300">
+              Show raw recognised text
+            </summary>
+            <div className="mt-2 bg-slate-800 rounded-lg p-3 text-xs text-slate-400 font-mono whitespace-pre-wrap max-h-40 overflow-auto">
+              {ocrText || '(no text detected)'}
+            </div>
+          </details>
+
+          <Button variant="outline" className="w-full border-slate-700 text-slate-300" onClick={reset}>
             Scan Again
           </Button>
         </div>
@@ -214,6 +334,12 @@ export function OcrScanner({ onProductFound, onBack }: OcrScannerProps) {
           <div className="bg-red-900/30 border border-red-800 rounded-lg p-4">
             <p className="text-sm text-red-300">{errorMsg}</p>
           </div>
+          {candidates.length > 0 && (
+            <Button variant="outline" className="w-full border-slate-700 text-slate-300"
+              onClick={() => setPhase('results')}>
+              Back to Results
+            </Button>
+          )}
           <Button variant="outline" className="w-full border-slate-700" onClick={reset}>
             Try Again
           </Button>

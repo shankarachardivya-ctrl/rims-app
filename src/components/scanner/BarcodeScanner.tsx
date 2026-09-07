@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { ArrowLeft, CheckCircle, Loader2, CameraOff } from 'lucide-react'
+import { ArrowLeft, CheckCircle, Loader2, CameraOff, Search } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { apiGetProduct } from '@/services/api'
+import { skuVariants } from '@/lib/skuExtract'
 import type { Product } from '@/types'
 
 interface BarcodeScannerProps {
@@ -28,6 +30,7 @@ export function BarcodeScanner({ onProductFound, onBack }: BarcodeScannerProps) 
   const [scannedSku, setScannedSku] = useState('')
   const [product, setProduct]       = useState<Product | null>(null)
   const [errorMsg, setErrorMsg]     = useState('')
+  const [manualSku, setManualSku]   = useState('')
 
   const stopStream = useCallback(() => {
     scanningRef.current = false
@@ -36,18 +39,30 @@ export function BarcodeScanner({ onProductFound, onBack }: BarcodeScannerProps) 
     streamRef.current = null
   }, [])
 
-  const handleSku = useCallback(async (sku: string) => {
+  const handleSku = useCallback(async (raw: string) => {
     stopStream()
+    const sku = raw.trim().toUpperCase()
     setScannedSku(sku)
     setStatus('loading')
-    const res = await apiGetProduct(sku)
-    if (res.success && res.data) {
-      setProduct(res.data)
-      setStatus('found')
-    } else {
-      setStatus('error')
-      setErrorMsg(`No product found for SKU: "${sku}"`)
+
+    // Retry glyph-confusion variants; many labels encode the SKU imperfectly.
+    for (const attempt of skuVariants(sku)) {
+      const res = await apiGetProduct(attempt)
+      if (res.success && res.data) {
+        setProduct(res.data)
+        setStatus('found')
+        return
+      }
     }
+
+    setStatus('error')
+    // A pure digit string is a retail barcode (EAN/UPC), which on many labels
+    // is NOT the SKU. Say so explicitly instead of a generic failure.
+    setErrorMsg(
+      /^\d{8,14}$/.test(sku)
+        ? `Scanned barcode ${sku} is a retail barcode (EAN/UPC), which is often different from the product SKU. Enter the SKU printed on the label instead.`
+        : `No product found for "${sku}".`
+    )
   }, [stopStream])
 
   const startScanner = useCallback(async () => {
@@ -242,12 +257,38 @@ export function BarcodeScanner({ onProductFound, onBack }: BarcodeScannerProps) 
           <div className="bg-red-900/30 border border-red-800 rounded-lg p-4">
             <p className="text-sm text-red-300">{errorMsg}</p>
           </div>
+
+          {/* Manual fallback so a barcode/SKU mismatch is never a dead end */}
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-slate-400" htmlFor="bc-manual">
+              Enter the SKU from the label
+            </label>
+            <div className="flex gap-2">
+              <Input
+                id="bc-manual"
+                className="bg-slate-800 border-slate-700 text-white font-mono uppercase"
+                placeholder="e.g. PPNA11KPAL"
+                value={manualSku}
+                onChange={(e) => setManualSku(e.target.value.toUpperCase())}
+                onKeyDown={(e) => { if (e.key === 'Enter' && manualSku.trim()) handleSku(manualSku) }}
+              />
+              <Button
+                className="bg-violet-600 hover:bg-violet-700 shrink-0"
+                onClick={() => handleSku(manualSku)}
+                disabled={!manualSku.trim()}
+                aria-label="Look up SKU"
+              >
+                <Search className="h-4 w-4" />
+              </Button>
+            </div>
+          </div>
+
           <Button
             variant="outline"
             className="w-full border-slate-700"
-            onClick={() => startScanner()}
+            onClick={() => { setManualSku(''); startScanner() }}
           >
-            Try Again
+            Scan Again
           </Button>
         </div>
       )}

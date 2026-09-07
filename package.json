@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+    "test:sku": "tsc src/lib/skuExtract.ts --outDir .tmp-test --module commonjs --target es2020 --strict && node -e \"require('fs').renameSync('.tmp-test/skuExtract.js','.tmp-test/skuExtract.cjs')\" && node scripts/test-sku-extract.cjs",
     "preview": "vite preview"
   },
   "dependencies": {

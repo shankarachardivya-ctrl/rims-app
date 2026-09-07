@@ -3,6 +3,7 @@ import { ArrowLeft, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { apiGetProduct } from '@/services/api'
+import { skuVariants } from '@/lib/skuExtract'
 import type { Product } from '@/types'
 
 interface ManualSkuEntryProps {
@@ -16,16 +17,22 @@ export function ManualSkuEntry({ onProductFound, onBack }: ManualSkuEntryProps) 
   const [error, setError]     = useState('')
 
   const lookup = async () => {
-    if (!sku.trim()) return
+    const value = sku.trim().toUpperCase()
+    if (!value) return
     setLoading(true)
     setError('')
-    const res = await apiGetProduct(sku.trim().toUpperCase())
-    setLoading(false)
-    if (res.success && res.data) {
-      onProductFound(res.data)
-    } else {
-      setError(`No product found for SKU: "${sku.trim().toUpperCase()}"`)
+
+    // Retry OCR/typing confusion variants (O/0, I/1, S/5, B/8, Z/2)
+    for (const attempt of skuVariants(value)) {
+      const res = await apiGetProduct(attempt)
+      if (res.success && res.data) {
+        setLoading(false)
+        onProductFound(res.data)
+        return
+      }
     }
+    setLoading(false)
+    setError(`No product found for SKU: "${value}"`)
   }
 
   return (
@@ -40,14 +47,16 @@ export function ManualSkuEntry({ onProductFound, onBack }: ManualSkuEntryProps) 
         </label>
         <Input
           id="sku-input"
-          placeholder="e.g. PLA-A11-KPAH"
+          placeholder="e.g. PPNA11KPAL"
           className="bg-slate-800 border-slate-700 text-white font-mono uppercase placeholder:text-slate-500"
           value={sku}
           onChange={(e) => { setSku(e.target.value.toUpperCase()); setError('') }}
           onKeyDown={(e) => { if (e.key === 'Enter') lookup() }}
           autoFocus
         />
-        <p className="text-xs text-slate-500">SKU codes are uppercase letters and numbers separated by dashes.</p>
+        <p className="text-xs text-slate-500">
+          Uppercase letters and numbers, e.g. PPNA11KPAL. Dashes are optional.
+        </p>
       </div>
 
       {error && (
