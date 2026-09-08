@@ -1,10 +1,39 @@
 import type { FilamentMaterial, ResinMaterial } from '@/types'
 
-// Replace this with your actual deployed Google Apps Script Web App URL
-export const APPS_SCRIPT_URL = import.meta.env.VITE_APPS_SCRIPT_URL || ''
+// ─── Google integration ───────────────────────────────────────────────────────
+// The app talks to Google Sheets directly via the REST API. There is no Apps
+// Script deployment to maintain: the user signs in with Google and picks their
+// workbook, and access is granted per-file through the Picker.
 
-// Google OAuth Client ID (from Google Cloud Console)
+/** OAuth 2.0 Web client ID. Cloud Console > Credentials. */
 export const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || ''
+
+/** API key, required by the Picker (not used for Sheets calls). */
+export const GOOGLE_API_KEY = import.meta.env.VITE_GOOGLE_API_KEY || ''
+
+/**
+ * Cloud project NUMBER (not the project id). The Picker needs it so that
+ * files selected by the user are granted to this app under drive.file.
+ */
+export const GOOGLE_PROJECT_NUMBER = import.meta.env.VITE_GOOGLE_PROJECT_NUMBER || ''
+
+/**
+ * Requested OAuth scopes.
+ *
+ * `drive.file` is deliberately narrow: the app can only touch files the user
+ * explicitly selects in the Picker, never their whole Drive. Sheets API
+ * accepts this scope for those files.
+ */
+export const GOOGLE_SCOPES = [
+  'https://www.googleapis.com/auth/drive.file',
+  'openid',
+  'email',
+  'profile',
+].join(' ')
+
+/** True when the Google integration has been configured. */
+export const isGoogleConfigured = () =>
+  Boolean(GOOGLE_CLIENT_ID) && Boolean(GOOGLE_API_KEY)
 
 export const FILAMENT_MATERIALS: FilamentMaterial[] = [
   'PLA',

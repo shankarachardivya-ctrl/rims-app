@@ -54,10 +54,12 @@ export interface Product {
   material: MaterialType
   brand: string
   color: string
-  weightPerSpool?: number   // grams per spool (filament)
-  mlPerBottle?: number      // ml per bottle (resin)
-  currentStock: number      // spools or bottles
-  minStock: number          // reorder threshold
+  /** Net weight per unit, in kg (sheet column Weight_kg). */
+  weightKg?: number
+  /** Filament diameter in mm, e.g. 1.75. */
+  diameter?: number
+  currentStock: number      // spools or bottles — joined from the Inventory tab
+  minStock: number          // sheet column Reorder_Level
   warehouse: string
   rack: string
   column: string
@@ -66,6 +68,8 @@ export interface Product {
   supplierName?: string
   purchasePrice: number
   sellingPrice: number
+  /** Printed maximum retail price, distinct from sellingPrice. */
+  mrp?: number
   lastTransactionDate?: string
   lastTransactionType?: TransactionType
   status: ProductStatus
@@ -77,16 +81,22 @@ export type TransactionType = 'stock_in' | 'sale' | 'internal_use'
 
 export interface Transaction {
   transactionId: string
-  date: string         // ISO date string
+  /** Full ISO timestamp — the sheet stores a single datetime, not date + time. */
+  timestamp: string
+  /** Derived from timestamp for display. */
+  date: string         // YYYY-MM-DD
+  /** Derived from timestamp for display. */
   time: string         // HH:MM:SS
   sku: string
-  productName: string  // material + brand + color
+  productName: string  // resolved by joining Products; not stored in the sheet
   transactionType: TransactionType
   quantity: number     // whole numbers only
   stockBefore: number
   stockAfter: number
   userId: string
   userName: string
+  /** How it was captured, e.g. "Scanned Barcode Entry" (sheet column Input_Type). */
+  inputType?: string
   remarks: string
   customerId?: string
   customerName?: string

@@ -8,6 +8,8 @@
     "build": "tsc && vite build",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "test:sku": "tsc src/lib/skuExtract.ts --outDir .tmp-test --module commonjs --target es2020 --strict && node -e \"require('fs').renameSync('.tmp-test/skuExtract.js','.tmp-test/skuExtract.cjs')\" && node scripts/test-sku-extract.cjs",
+    "test:migration": "node scripts/test-migration-logic.cjs",
+    "test:schema": "tsc -p scripts/tsconfig.test.json && node -e \"require('fs').renameSync('.tmp-test/lib/sheetSchema.js','.tmp-test/sheetSchema.cjs')\" && node scripts/test-sheet-schema.cjs",
     "preview": "vite preview"
   },
   "dependencies": {

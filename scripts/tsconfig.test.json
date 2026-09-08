@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "outDir": "../.tmp-test",
+    "baseUrl": "..",
+    "paths": { "@/*": ["src/*"] },
+    "types": []
+  },
+  "files": ["../src/lib/sheetSchema.ts", "../src/lib/skuExtract.ts"]
+}

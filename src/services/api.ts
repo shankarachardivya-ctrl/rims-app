@@ -1,139 +1,152 @@
 /**
- * API Service — communicates with Google Apps Script web app endpoints.
- * All requests go through the deployed Apps Script URL via HTTP GET/POST.
+ * API surface used by the stores and pages.
+ *
+ * Previously this called a Google Apps Script web app. It now delegates to
+ * sheetsRepo, which talks to the Google Sheets REST API directly, so there is
+ * no script to paste or deployment URL to maintain — the user signs in with
+ * Google and picks their workbook.
+ *
+ * The ApiResponse envelope is kept so callers did not have to change.
  */
 
-import { APPS_SCRIPT_URL } from '@/lib/constants'
+import * as repo from './sheetsRepo'
+import { NoSheetError } from './sheetConfig'
+import { SheetsError } from './sheetsClient'
+import { GoogleAuthError } from './googleAuth'
 import type {
-  ApiResponse,
-  Product,
-  Transaction,
-  DashboardData,
-  Supplier,
-  Customer,
-  PreOrder,
-  BOMItem,
-  User,
+  ApiResponse, Product, Transaction, DashboardData,
+  Supplier, Customer, PreOrder, BOMItem, User,
 } from '@/types'
 
-async function get<T>(action: string, params: Record<string, string> = {}): Promise<ApiResponse<T>> {
+/**
+ * Run a repository call and normalise both success and failure into
+ * ApiResponse, turning low-level errors into messages a user can act on.
+ */
+async function wrap<T>(fn: () => Promise<T>): Promise<ApiResponse<T>> {
   try {
-    const url = new URL(APPS_SCRIPT_URL)
-    url.searchParams.set('action', action)
-    for (const [k, v] of Object.entries(params)) {
-      url.searchParams.set(k, v)
-    }
-    const res = await fetch(url.toString())
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const json = await res.json()
-    return json as ApiResponse<T>
+    return { success: true, data: await fn() }
   } catch (err) {
-    return { success: false, error: String(err) }
+    return { success: false, error: describeError(err) }
   }
 }
 
-async function post<T>(action: string, body: unknown): Promise<ApiResponse<T>> {
-  try {
-    const res = await fetch(APPS_SCRIPT_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(Object.assign({ action }, body as object)),
-    })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const json = await res.json()
-    return json as ApiResponse<T>
-  } catch (err) {
-    return { success: false, error: String(err) }
+function describeError(err: unknown): string {
+  if (err instanceof NoSheetError) {
+    return 'No inventory workbook selected. Choose your Google Sheet to continue.'
   }
+  if (err instanceof GoogleAuthError) {
+    return `${err.message} Sign in with Google again to continue.`
+  }
+  if (err instanceof SheetsError) return err.message
+  if (err instanceof Error) return err.message
+  return String(err)
 }
 
 // ─── Products ─────────────────────────────────────────────────────────────────
 
 export const apiGetProduct = (sku: string) =>
-  get<Product>('getProduct', { sku })
+  wrap(async () => {
+    const p = await repo.getProduct(sku)
+    if (!p) throw new Error(`No product found for SKU "${sku}".`)
+    return p
+  })
 
 export const apiSearchProducts = (query: string) =>
-  get<Product[]>('searchProducts', { query })
+  wrap(() => repo.searchProducts(query))
 
 export const apiGetAllProducts = () =>
-  get<Product[]>('getAllProducts')
+  wrap(() => repo.getAllProducts())
 
-export const apiAddProduct = (product: Omit<Product, 'currentStock' | 'lastTransactionDate' | 'lastTransactionType'>) =>
-  post<Product>('addProduct', { product })
+export const apiAddProduct = (
+  product: Omit<Product, 'currentStock' | 'lastTransactionDate' | 'lastTransactionType'>
+) => wrap(() => repo.addProduct(product as Omit<Product, 'currentStock'>))
 
 export const apiUpdateProduct = (product: Product) =>
-  post<Product>('updateProduct', { product })
+  wrap(() => repo.updateProduct(product))
 
 export const apiDeleteProduct = (sku: string) =>
-  post<void>('deleteProduct', { sku })
+  wrap(() => repo.deleteProduct(sku))
 
 // ─── Transactions ─────────────────────────────────────────────────────────────
 
-export const apiPostTransaction = (transaction: Omit<Transaction, 'stockBefore' | 'stockAfter'>) =>
-  post<Transaction>('postTransaction', { transaction })
+export const apiPostTransaction = (
+  transaction: Omit<Transaction, 'stockBefore' | 'stockAfter'>
+) => wrap(() => repo.postTransaction(transaction))
 
 export const apiGetTransactions = (params?: { sku?: string; from?: string; to?: string }) =>
-  get<Transaction[]>('getTransactions', params as Record<string, string>)
+  wrap(() => repo.getTransactions(params))
+
+/** Rebuild Inventory from the append-only ledger. */
+export const apiReconcileInventory = () =>
+  wrap(() => repo.reconcileInventory())
 
 // ─── Dashboard ────────────────────────────────────────────────────────────────
 
-export const apiGetDashboard = () =>
-  get<DashboardData>('getDashboard')
+export const apiGetDashboard = (): Promise<ApiResponse<DashboardData>> =>
+  wrap(() => repo.getDashboard())
 
 // ─── Suppliers ────────────────────────────────────────────────────────────────
 
-export const apiGetSuppliers = () =>
-  get<Supplier[]>('getSuppliers')
+export const apiGetSuppliers = (): Promise<ApiResponse<Supplier[]>> =>
+  wrap(() => repo.getSuppliers())
 
 export const apiAddSupplier = (supplier: Omit<Supplier, 'supplierId'>) =>
-  post<Supplier>('addSupplier', { supplier })
+  wrap(() => repo.addSupplier(supplier))
 
 export const apiUpdateSupplier = (supplier: Supplier) =>
-  post<Supplier>('updateSupplier', { supplier })
+  wrap(() => repo.updateSupplier(supplier))
 
 export const apiDeleteSupplier = (supplierId: string) =>
-  post<void>('deleteSupplier', { supplierId })
+  wrap(() => repo.deleteSupplier(supplierId))
 
 // ─── Customers ────────────────────────────────────────────────────────────────
 
-export const apiGetCustomers = () =>
-  get<Customer[]>('getCustomers')
+export const apiGetCustomers = (): Promise<ApiResponse<Customer[]>> =>
+  wrap(() => repo.getCustomers())
 
 export const apiAddCustomer = (customer: Omit<Customer, 'customerId'>) =>
-  post<Customer>('addCustomer', { customer })
+  wrap(() => repo.addCustomer(customer))
 
 export const apiUpdateCustomer = (customer: Customer) =>
-  post<Customer>('updateCustomer', { customer })
+  wrap(() => repo.updateCustomer(customer))
 
 export const apiDeleteCustomer = (customerId: string) =>
-  post<void>('deleteCustomer', { customerId })
+  wrap(() => repo.deleteCustomer(customerId))
 
 // ─── Pre-Orders ───────────────────────────────────────────────────────────────
 
-export const apiGetPreOrders = () =>
-  get<PreOrder[]>('getPreOrders')
+export const apiGetPreOrders = (): Promise<ApiResponse<PreOrder[]>> =>
+  wrap(() => repo.getPreOrders())
 
 export const apiPostPreOrder = (order: Omit<PreOrder, 'orderId' | 'dateEntered'>) =>
-  post<PreOrder>('postPreOrder', { order })
+  wrap(() => repo.postPreOrder(order))
 
 export const apiUpdatePreOrderStatus = (orderId: string, status: PreOrder['status']) =>
-  post<void>('updatePreOrderStatus', { orderId, status })
+  wrap(() => repo.updatePreOrderStatus(orderId, status))
 
 // ─── BOM ──────────────────────────────────────────────────────────────────────
 
-export const apiGetBOM = () =>
-  get<BOMItem[]>('getBOM')
+export const apiGetBOM = (): Promise<ApiResponse<BOMItem[]>> =>
+  wrap(() => repo.getBOM())
 
 // ─── Users ────────────────────────────────────────────────────────────────────
 
-export const apiGetUsers = () =>
-  get<User[]>('getUsers')
+export const apiGetUsers = (): Promise<ApiResponse<User[]>> =>
+  wrap(() => repo.getUsers())
 
 export const apiAddUser = (user: Omit<User, 'id'>) =>
-  post<User>('addUser', { user })
+  wrap(() => repo.addUser(user))
 
 export const apiUpdateUser = (user: User) =>
-  post<User>('updateUser', { user })
+  wrap(() => repo.updateUser(user))
 
 export const apiDeleteUser = (userId: string) =>
-  post<void>('deleteUser', { userId })
+  wrap(() => repo.deleteUser(userId))
+
+/** Look up the signed-in Google account in the Users tab. */
+export const apiFindUser = (email: string) =>
+  wrap(async () => {
+    const u = await repo.findUser(email)
+    if (!u) throw new Error(`${email} is not listed in the Users tab of the workbook.`)
+    return u
+  })

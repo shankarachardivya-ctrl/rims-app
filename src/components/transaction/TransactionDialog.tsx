@@ -1,12 +1,14 @@
-import { useState, useMemo } from 'react'
-import { CheckCircle2, Loader2 } from 'lucide-react'
+import { useState, useMemo, useEffect } from 'react'
+import { CheckCircle2, Loader2, ShieldOff } from 'lucide-react'
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { useTransactionStore } from '@/store/transactionStore'
-import { useAuthStore } from '@/store/authStore'
+import {
+  useAuthStore, useCanStockIn, useCanStockOut, useCanSell,
+} from '@/store/authStore'
 import { useDashboardStore } from '@/store/dashboardStore'
 import { generateTransactionId, nowISO, nowTime, unitLabel, transactionLabel } from '@/lib/utils'
 import { toast } from '@/hooks/useToast'
@@ -22,6 +24,20 @@ export function TransactionDialog({ open, onOpenChange, product }: TransactionDi
   const { submit, isSubmitting } = useTransactionStore()
   const { user }                 = useAuthStore()
   const { fetch: refetchDash }   = useDashboardStore()
+
+  // Permissions come from the Users tab of the workbook
+  const canStockIn  = useCanStockIn()
+  const canStockOut = useCanStockOut()
+  const canSell     = useCanSell()
+
+  /** Transaction types this user is allowed to record. */
+  const allowedTypes = useMemo(() => {
+    const types: TransactionType[] = []
+    if (canStockIn) types.push('stock_in')
+    if (canSell) types.push('sale')
+    if (canStockOut) types.push('internal_use')
+    return types
+  }, [canStockIn, canSell, canStockOut])
 
   const [txType, setTxType]     = useState<TransactionType>('stock_in')
   const [quantity, setQuantity] = useState('')
@@ -45,7 +61,24 @@ export function TransactionDialog({ open, onOpenChange, product }: TransactionDi
     setQuantity(val)
   }
 
+  // Keep the selection valid if permissions do not include the default
+  useEffect(() => {
+    if (allowedTypes.length > 0 && !allowedTypes.includes(txType)) {
+      setTxType(allowedTypes[0])
+    }
+  }, [allowedTypes, txType])
+
   const handleSubmit = async () => {
+    // Server-side rules live in the repo; this is the first line of defence.
+    if (!allowedTypes.includes(txType)) {
+      toast({
+        title: 'Not permitted',
+        description: `Your role cannot record a ${transactionLabel(txType)} transaction.`,
+        variant: 'destructive',
+      })
+      return
+    }
+
     const qty = parseInt(quantity, 10)
     if (!qty || qty <= 0) {
       toast({ title: 'Invalid quantity', description: 'Enter a whole number greater than 0.', variant: 'destructive' })
@@ -58,8 +91,10 @@ export function TransactionDialog({ open, onOpenChange, product }: TransactionDi
       return
     }
 
+    const now = new Date()
     const ok = await submit({
       transactionId: txId,
+      timestamp: now.toISOString(),
       date: nowISO(),
       time: nowTime(),
       sku: product.sku,
@@ -134,11 +169,25 @@ export function TransactionDialog({ open, onOpenChange, product }: TransactionDi
             </div>
           </div>
 
+          {/* No permitted transaction types at all — read-only role */}
+          {allowedTypes.length === 0 && (
+            <div className="bg-slate-800 border border-slate-700 rounded-lg p-4 flex items-start gap-3">
+              <ShieldOff className="h-5 w-5 text-slate-500 shrink-0 mt-0.5" />
+              <div>
+                <p className="text-sm font-medium text-white">Read-only access</p>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Your role cannot record stock movements. Ask an admin to update your
+                  permissions in the Users tab.
+                </p>
+              </div>
+            </div>
+          )}
+
           {/* Transaction type */}
-          <div className="space-y-1.5">
+          <div className={allowedTypes.length === 0 ? 'hidden' : 'space-y-1.5'}>
             <label className="text-sm font-medium text-slate-300">Transaction Type</label>
             <div className="grid grid-cols-3 gap-2">
-              {(['stock_in', 'sale', 'internal_use'] as TransactionType[]).map((type) => (
+              {allowedTypes.map((type) => (
                 <button
                   key={type}
                   onClick={() => setTxType(type)}
@@ -159,7 +208,7 @@ export function TransactionDialog({ open, onOpenChange, product }: TransactionDi
           </div>
 
           {/* Quantity */}
-          <div className="space-y-1.5">
+          <div className={allowedTypes.length === 0 ? 'hidden' : 'space-y-1.5'}>
             <label className="text-sm font-medium text-slate-300" htmlFor="tx-qty">
               Quantity <span className="text-slate-500 font-normal text-xs">(whole numbers only)</span>
             </label>
@@ -197,7 +246,7 @@ export function TransactionDialog({ open, onOpenChange, product }: TransactionDi
           <Button
             className="bg-violet-600 hover:bg-violet-700"
             onClick={handleSubmit}
-            disabled={isSubmitting || !quantity}
+            disabled={isSubmitting || !quantity || allowedTypes.length === 0}
           >
             {isSubmitting ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Saving…</> : 'Submit Transaction'}
           </Button>
